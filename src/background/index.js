@@ -142,6 +142,49 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (type === MESSAGE_TYPES.GET_STATE) {
     (async () => {
       tabIntentsCache = await loadTabIntents();
+
+      // Best-effort refresh of title/url from currently open tabs.
+      // This helps recover from cases where URL/title were unavailable at creation time
+      // or were previously sanitized more strictly.
+      await new Promise((resolve) => {
+        chrome.tabs.query({}, async (tabs) => {
+          if (chrome.runtime.lastError || !Array.isArray(tabs)) {
+            resolve();
+            return;
+          }
+
+          let changed = false;
+          for (const t of tabs) {
+            if (!t || typeof t.id !== "number") continue;
+            const key = String(t.id);
+            const existing = tabIntentsCache[key];
+            if (!existing) continue;
+
+            const refreshed = normalizeTabRecord(key, {
+              ...existing,
+              title: t.title || existing.title || "",
+              url: t.url || existing.url || ""
+            });
+            if (!refreshed) continue;
+
+            if (refreshed.title !== existing.title || refreshed.url !== existing.url) {
+              tabIntentsCache[key] = refreshed;
+              changed = true;
+            }
+          }
+
+          if (changed) {
+            try {
+              await saveTabIntents(tabIntentsCache);
+            } catch {
+              // Ignore write failures; we can still return refreshed in-memory state.
+            }
+          }
+
+          resolve();
+        });
+      });
+
       sendResponse({ ok: true, data: tabIntentsCache });
     })();
     return true;
@@ -169,8 +212,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
       const sanitizedPurpose = sanitizeFreeText(purpose);
 
+      // If title/url were not available when the tab was first seen (common for
+      // fast user actions or redirects), refresh from the live tab now.
+      const liveTab = await new Promise((resolve) => {
+        chrome.tabs.get(tabId, (t) => {
+          resolve(t || null);
+        });
+      });
+
       const updated = normalizeTabRecord(key, {
         ...existing,
+        title: liveTab?.title || existing.title || "",
+        url: liveTab?.url || existing.url || "",
         purpose: sanitizedPurpose,
         lastAccessed: Date.now()
       });

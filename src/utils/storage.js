@@ -77,7 +77,9 @@ export function normalizeTabRecord(key, value) {
   const tabIdNum = Number(value.tabId ?? key);
   if (!Number.isFinite(tabIdNum)) return null;
 
-  const url = sanitizeUrl(value.url || "");
+  // Always store `url` as a string to keep UI rendering predictable.
+  // If the URL is unavailable or blocked by sanitization, store "".
+  const url = sanitizeUrl(value.url || "") || "";
   const title = sanitizeFreeText(value.title || "", 300);
   const purpose = sanitizeFreeText(value.purpose || "", 500);
 

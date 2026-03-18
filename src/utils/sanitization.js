@@ -25,7 +25,10 @@ export function sanitizeUrl(url) {
   if (typeof url !== "string" || url.length === 0) return null;
 
   try {
-    const parsed = new URL(url);
+    const trimmed = url.trim();
+    if (trimmed.length === 0) return null;
+
+    const parsed = new URL(trimmed);
 
     // Disallow executable / sensitive protocols.
     // We *do* allow browser-internal pages (e.g. chrome://settings) so users can
@@ -37,7 +40,15 @@ export function sanitizeUrl(url) {
     }
 
     // Allowlist common protocols we expect to encounter in tab URLs.
-    const allowed = new Set(["http:", "https:", "chrome:", "edge:", "about:"]);
+    const allowed = new Set([
+      "http:",
+      "https:",
+      "chrome:",
+      "chrome-error:",
+      "chrome-extension:",
+      "edge:",
+      "about:"
+    ]);
     if (!allowed.has(parsed.protocol)) {
       return null;
     }
