@@ -1,6 +1,6 @@
-# TabSense (Chrome Extension - Manifest V3)
+# TabZen (Chrome Extension - Manifest V3)
 
-TabSense is a **security-first, context-aware tab manager** that helps users remember **why** they opened each tab, organize tabs by intent, and receive gentle reminders to reduce tab overload.
+TabZen is a **security-first, context-aware tab manager** that helps users remember **why** they opened each tab, organize tabs by intent, and receive gentle reminders to reduce tab overload.
 
 ---
 
@@ -18,7 +18,7 @@ Traditional tab managers focus on *quantity* (close/suspend) rather than *purpos
 
 ## Why This Solution
 
-TabSense addresses tab overload by capturing **user intent** at the moment it matters:
+TabZen addresses tab overload by capturing **user intent** at the moment it matters:
 
 - **Intent capture**: “Why did you open this tab?” is saved per tab.
 - **Purpose-first grouping**: tabs are organized by intent, not just domain.
@@ -37,7 +37,7 @@ The design is **production-oriented**:
 
 ### 1) Tab Tracking (Chrome Tabs API)
 
-TabSense listens for tab lifecycle events and stores metadata:
+TabZen listens for tab lifecycle events and stores metadata:
 
 - `tabId`
 - `title`
@@ -69,7 +69,7 @@ Tabs are grouped by `purpose` in the popup dashboard:
 
 ### 4) Smart Reminder System (Chrome Alarms + Notifications)
 
-TabSense uses:
+TabZen uses:
 
 - `chrome.alarms` to periodically evaluate unfinished tabs
 - `chrome.notifications` to nudge the user if they have unfinished “open” tabs with a purpose
@@ -78,7 +78,7 @@ Includes **rate limiting** to prevent notification spam.
 
 ### 5) Optional “AI” Auto-Categorization (Local Only)
 
-TabSense includes a safe abstraction (`src/utils/aiCategorizer.js`) that performs a **local heuristic guess** based on title/URL keywords.
+TabZen includes a safe abstraction (`src/utils/aiCategorizer.js`) that performs a **local heuristic guess** based on title/URL keywords.
 
 - No network calls
 - No API keys
@@ -175,7 +175,7 @@ All messages are validated and allow-listed in `src/utils/messaging.js`.
 
 ### URL Handling Safety
 
-TabSense stores and displays URLs but does **not** execute them.
+TabZen stores and displays URLs but does **not** execute them.
 
 - Blocks dangerous protocols (`javascript:`, `data:`, `file:`)
 - Allows common tab protocols (e.g. `https:`, `chrome:`) so internal pages remain identifiable
@@ -216,14 +216,14 @@ This outputs:
 1. Open `chrome://extensions`
 2. Enable **Developer mode**
 3. Click **Load unpacked**
-4. Select the folder: `tabsense-extension/public`
+4. Select the folder: `TabZen-extension/public`
 ---
 
 ## How to Use (End User)
 
 ### Save a purpose for the active tab
 
-1. Click the TabSense toolbar icon
+1. Click the TabZen toolbar icon
 2. Type a purpose into **Current tab purpose**
 3. Click **Save purpose**
 
