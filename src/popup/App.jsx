@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { MESSAGE_TYPES } from "../utils/messaging";
 import { sanitizeFreeText } from "../utils/sanitization";
-import { REMINDER_INTERVAL_MINUTES } from "../utils/config";
+import { REMINDER_INTERVAL_MINUTES, STALE_TAB_HOURS } from "../utils/config";
 
 const STATUS_ORDER = {
   open: 0,
@@ -25,6 +25,13 @@ function sortTabs(a, b) {
   const s2 = STATUS_ORDER[b.status] ?? 0;
   if (s1 !== s2) return s1 - s2;
   return (b.lastAccessed || 0) - (a.lastAccessed || 0);
+}
+
+const STALE_MS = STALE_TAB_HOURS * 60 * 60 * 1000;
+
+function isStale(tab) {
+  const last = typeof tab.lastAccessed === "number" ? tab.lastAccessed : 0;
+  return last > 0 && Date.now() - last >= STALE_MS;
 }
 
 function displayTitle(tab) {
@@ -89,6 +96,78 @@ export default function App() {
   }, [tabsMap]);
 
   const groups = useMemo(() => groupByPurpose(tabsMap), [tabsMap]);
+
+  // Unique purposes for autocomplete (excluding "Uncategorized"), most recently used first.
+  const purposeSuggestions = useMemo(() => {
+    const set = new Set();
+    const list = [];
+    Object.values(tabsMap || {})
+      .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))
+      .forEach((t) => {
+        const p = sanitizeFreeText(t.purpose || "", 80);
+        if (p && p !== "Uncategorized" && !set.has(p)) {
+          set.add(p);
+          list.push(p);
+          if (list.length >= 8) return;
+        }
+      });
+    return list;
+  }, [tabsMap]);
+
+  const [sessions, setSessions] = useState([]);
+  const [sessionName, setSessionName] = useState("");
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [sessionSaving, setSessionSaving] = useState(false);
+  const [sessionRestoring, setSessionRestoring] = useState(null);
+
+  useEffect(() => {
+    chrome.runtime.sendMessage(
+      { type: MESSAGE_TYPES.GET_SESSIONS },
+      (res) => {
+        if (res?.ok && Array.isArray(res.data)) setSessions(res.data);
+      }
+    );
+  }, []);
+
+  const handleSaveSession = () => {
+    const name = sanitizeFreeText(sessionName, 80).trim();
+    if (!name) return;
+    setSessionSaving(true);
+    chrome.runtime.sendMessage(
+      { type: MESSAGE_TYPES.SAVE_SESSION, payload: { name } },
+      (res) => {
+        setSessionSaving(false);
+        if (!res?.ok) return;
+        setSessions((prev) => [res.data, ...prev]);
+        setSessionName("");
+      }
+    );
+  };
+
+  const handleRestoreSession = (sessionId) => {
+    setSessionRestoring(sessionId);
+    chrome.runtime.sendMessage(
+      { type: MESSAGE_TYPES.RESTORE_SESSION, payload: { sessionId } },
+      (res) => {
+        setSessionRestoring(null);
+        if (res?.ok) {
+          refresh();
+          window.close();
+        }
+      }
+    );
+  };
+
+  const handleDeleteSession = (sessionId) => {
+    if (!confirm("Delete this saved session?")) return;
+    chrome.runtime.sendMessage(
+      { type: MESSAGE_TYPES.DELETE_SESSION, payload: { sessionId } },
+      (res) => {
+        if (!res?.ok) return;
+        setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      }
+    );
+  };
 
   const handleSavePurpose = () => {
     if (activeTabId == null) return;
@@ -160,6 +239,42 @@ export default function App() {
     });
   };
 
+  const [groupingPurpose, setGroupingPurpose] = useState(null);
+
+  const handleCreateChromeGroup = (purpose, items) => {
+    const tabIds = items.map((t) => t.tabId).filter((id) => Number.isFinite(id));
+    if (tabIds.length === 0) return;
+    setGroupingPurpose(purpose);
+    chrome.windows.getCurrent((win) => {
+      const windowId = win?.id;
+      if (typeof windowId !== "number") {
+        setGroupingPurpose(null);
+        return;
+      }
+      chrome.tabs.query({ windowId }, (windowTabs) => {
+        const existingIds = new Set((windowTabs || []).map((t) => t.id));
+        const toGroup = tabIds.filter((id) => existingIds.has(id));
+        if (toGroup.length === 0) {
+          setGroupingPurpose(null);
+          return;
+        }
+        chrome.tabs.group({ tabIds: toGroup, createProperties: { windowId } }, () => {
+          if (chrome.runtime.lastError) {
+            setGroupingPurpose(null);
+            return;
+          }
+          chrome.tabs.get(toGroup[0], (tab) => {
+            if (tab && typeof tab.groupId === "number" && tab.groupId >= 0) {
+              const title = sanitizeFreeText(purpose || "Uncategorized", 50);
+              chrome.tabGroups.update(tab.groupId, { title });
+            }
+            setGroupingPurpose(null);
+          });
+        });
+      });
+    });
+  };
+
   return (
     <div className="w-[420px] max-h-[580px] p-4 bg-slate-950 text-slate-50">
       <header className="flex items-center justify-between mb-3">
@@ -200,6 +315,21 @@ export default function App() {
             {saving ? "Saving..." : "Save purpose"}
           </button>
         </div>
+        {purposeSuggestions.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            <span className="text-[9px] text-slate-500 self-center">Quick add:</span>
+            {purposeSuggestions.map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setActivePurpose(p)}
+                className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700"
+              >
+                {p.length > 20 ? p.slice(0, 18) + "…" : p}
+              </button>
+            ))}
+          </div>
+        )}
       </section>
 
       {error && (
@@ -207,6 +337,67 @@ export default function App() {
           {sanitizeFreeText(error, 120)}
         </div>
       )}
+
+      <section className="mb-2">
+        <button
+          type="button"
+          onClick={() => setSessionsOpen((o) => !o)}
+          className="text-xs font-semibold text-slate-300 hover:text-slate-200 flex items-center gap-1 mb-1"
+        >
+          {sessionsOpen ? "▼" : "▶"} Saved sessions
+        </button>
+        {sessionsOpen && (
+          <div className="mb-2 p-2 rounded border border-slate-800 bg-slate-900/60 space-y-2">
+            <div className="flex gap-1">
+              <input
+                type="text"
+                value={sessionName}
+                onChange={(e) => setSessionName(e.target.value)}
+                placeholder="Session name"
+                maxLength={80}
+                className="flex-1 text-xs rounded border border-slate-700 bg-slate-900 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              />
+              <button
+                type="button"
+                onClick={handleSaveSession}
+                disabled={sessionSaving || !sessionName.trim()}
+                className="text-xs px-2 py-1 rounded bg-slate-700 hover:bg-emerald-600 disabled:opacity-50"
+              >
+                {sessionSaving ? "…" : "Save current"}
+              </button>
+            </div>
+            {sessions.length === 0 ? (
+              <p className="text-[10px] text-slate-500">No sessions yet. Name and save your current tabs to restore later.</p>
+            ) : (
+              <ul className="space-y-1 max-h-24 overflow-y-auto">
+                {sessions.map((s) => (
+                  <li key={s.id} className="flex items-center justify-between gap-1 text-[10px]">
+                    <span className="truncate text-slate-300">{s.name}</span>
+                    <span className="text-slate-500 shrink-0">{s.tabs?.length || 0} tabs</span>
+                    <div className="shrink-0 flex gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => handleRestoreSession(s.id)}
+                        disabled={sessionRestoring === s.id}
+                        className="px-1.5 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-slate-100"
+                      >
+                        {sessionRestoring === s.id ? "…" : "Restore"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSession(s.id)}
+                        className="px-1.5 py-0.5 rounded bg-slate-700 hover:bg-red-800 text-slate-300"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </section>
 
       <section className="mb-2 flex items-center justify-between">
         <h2 className="text-xs font-semibold text-slate-300">
@@ -220,7 +411,7 @@ export default function App() {
         </button>
       </section>
 
-      <div className="space-y-2 overflow-y-auto max-h-72 pr-1 custom-scroll">
+      <div className="space-y-2 overflow-y-auto max-h-56 pr-1 custom-scroll">
         {loading && (
           <div className="text-xs text-slate-400">Loading tab data...</div>
         )}
@@ -236,13 +427,22 @@ export default function App() {
             key={purpose || "uncategorized"}
             className="rounded border border-slate-800 bg-slate-900/40"
           >
-            <div className="px-2 py-1 border-b border-slate-800 flex items-center justify-between">
-              <span className="text-[11px] font-medium text-emerald-300 truncate max-w-[260px]">
+            <div className="px-2 py-1 border-b border-slate-800 flex items-center justify-between gap-1">
+              <span className="text-[11px] font-medium text-emerald-300 truncate min-w-0 flex-1">
                 {purpose || "Uncategorized"}
               </span>
-              <span className="text-[10px] text-slate-500">
+              <span className="text-[10px] text-slate-500 shrink-0">
                 {items.length} tab{items.length > 1 ? "s" : ""}
               </span>
+              <button
+                type="button"
+                onClick={() => handleCreateChromeGroup(purpose || "Uncategorized", items)}
+                disabled={groupingPurpose !== null || items.length === 0}
+                title="Create a Chrome tab group with this name and move these tabs into it"
+                className="text-[9px] px-1.5 py-0.5 rounded bg-slate-700 hover:bg-violet-600 text-slate-300 hover:text-white shrink-0 disabled:opacity-50"
+              >
+                {groupingPurpose === purpose ? "…" : "Group in Chrome"}
+              </button>
             </div>
             <ul className="divide-y divide-slate-800">
               {items
@@ -265,6 +465,11 @@ export default function App() {
                         >
                           {tab.status === "done" ? "Done" : "Open"}
                         </span>
+                        {isStale(tab) && (
+                          <span className="text-[9px] px-1 py-0.5 rounded bg-slate-700 text-slate-400" title="Not used in 24h+">
+                            24h+
+                          </span>
+                        )}
                         {tab.tabId === activeTabId && (
                           <span className="text-[9px] text-sky-300">
                             Active
@@ -309,9 +514,20 @@ export default function App() {
         ))}
       </div>
 
-      <footer className="mt-3 text-[9px] text-slate-500">
-        Smart reminders run every {REMINDER_INTERVAL_MINUTES} minutes in the
-        background.
+      <footer className="mt-3 text-[9px] text-slate-500 space-y-0.5">
+        <p>
+          Smart reminders run every {REMINDER_INTERVAL_MINUTES} minutes in the
+          background.
+        </p>
+        <button
+          type="button"
+          onClick={() =>
+            window.open("https://forms.gle/ChkQKfsoJovZtrhG8", "_blank")
+          }
+          className="text-[9px] text-sky-400 hover:text-sky-300 underline"
+        >
+          Coming soon: AI summaries &amp; sync – Join waitlist
+        </button>
       </footer>
     </div>
   );

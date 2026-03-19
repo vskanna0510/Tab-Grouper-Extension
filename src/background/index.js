@@ -1,6 +1,15 @@
 import { loadTabIntents, saveTabIntents, normalizeTabRecord } from "../utils/storage";
-import { MESSAGE_TYPES, isValidMessage, validateMarkDonePayload, validateUpdatePurposePayload } from "../utils/messaging";
-import { sanitizeFreeText } from "../utils/sanitization";
+import { loadSessions, saveSessions, normalizeSession } from "../utils/sessions";
+import {
+  MESSAGE_TYPES,
+  isValidMessage,
+  validateMarkDonePayload,
+  validateUpdatePurposePayload,
+  validateSaveSessionPayload,
+  validateRestoreSessionPayload,
+  validateDeleteSessionPayload
+} from "../utils/messaging";
+import { sanitizeFreeText, sanitizeUrl } from "../utils/sanitization";
 import { REMINDER_INTERVAL_MINUTES } from "../utils/config";
 import { guessPurposeFromTab } from "../utils/aiCategorizer";
 
@@ -271,6 +280,103 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     (async () => {
       tabIntentsCache = {};
       await saveTabIntents(tabIntentsCache);
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (type === MESSAGE_TYPES.GET_SESSIONS) {
+    (async () => {
+      const sessions = await loadSessions();
+      sendResponse({ ok: true, data: sessions });
+    })();
+    return true;
+  }
+
+  if (type === MESSAGE_TYPES.SAVE_SESSION) {
+    const valid = validateSaveSessionPayload(payload);
+    if (!valid) {
+      sendResponse({ ok: false, error: "Invalid payload" });
+      return;
+    }
+    (async () => {
+      tabIntentsCache = await loadTabIntents();
+      const tabs = Object.values(tabIntentsCache)
+        .map((t) => ({
+          url: t.url,
+          title: t.title,
+          purpose: t.purpose || ""
+        }))
+        .filter((t) => t.url && sanitizeUrl(t.url));
+      const session = normalizeSession({
+        name: valid.name,
+        createdAt: Date.now(),
+        tabs
+      });
+      if (!session || session.tabs.length === 0) {
+        sendResponse({ ok: false, error: "No restorable tabs to save" });
+        return;
+      }
+      const sessions = await loadSessions();
+      sessions.unshift(session);
+      await saveSessions(sessions);
+      sendResponse({ ok: true, data: session });
+    })();
+    return true;
+  }
+
+  if (type === MESSAGE_TYPES.RESTORE_SESSION) {
+    const valid = validateRestoreSessionPayload(payload);
+    if (!valid) {
+      sendResponse({ ok: false, error: "Invalid payload" });
+      return;
+    }
+    (async () => {
+      const sessions = await loadSessions();
+      const session = sessions.find((s) => s.id === valid.sessionId);
+      if (!session || !session.tabs.length) {
+        sendResponse({ ok: false, error: "Session not found or empty" });
+        return;
+      }
+      for (const tab of session.tabs) {
+        const url = sanitizeUrl(tab.url) || "";
+        if (!url || !url.startsWith("http")) continue;
+        await new Promise((resolve) => {
+          chrome.tabs.create({ url }, (newTab) => {
+            if (newTab?.id) {
+              const record = normalizeTabRecord(newTab.id, {
+                tabId: newTab.id,
+                title: tab.title || newTab.title || "",
+                url: newTab.url || url,
+                purpose: sanitizeFreeText(tab.purpose || ""),
+                createdAt: Date.now(),
+                lastAccessed: Date.now(),
+                status: "open"
+              });
+              if (record) {
+                tabIntentsCache[String(newTab.id)] = record;
+                saveTabIntents(tabIntentsCache).catch(() => {});
+              }
+            }
+            resolve();
+          });
+        });
+      }
+      sendResponse({ ok: true, restored: session.tabs.length });
+    })();
+    return true;
+  }
+
+  if (type === MESSAGE_TYPES.DELETE_SESSION) {
+    const valid = validateDeleteSessionPayload(payload);
+    if (!valid) {
+      sendResponse({ ok: false, error: "Invalid payload" });
+      return;
+    }
+    (async () => {
+      const sessions = await loadSessions();
+      const filtered = sessions.filter((s) => s.id !== valid.sessionId);
+      await saveSessions(filtered);
       sendResponse({ ok: true });
     })();
     return true;
